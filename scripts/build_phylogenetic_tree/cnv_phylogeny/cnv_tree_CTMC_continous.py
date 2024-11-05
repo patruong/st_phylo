@@ -1,3 +1,4 @@
+import pandas as pd
 import numpy as np
 import itertools
 from Bio import Phylo
@@ -6,6 +7,7 @@ from Bio.Phylo.BaseTree import Clade
 from scipy.stats import lognorm
 from scipy.cluster.hierarchy import linkage, to_tree
 from scipy.spatial.distance import pdist
+from scipy.optimize import minimize
 
 import random
 import copy
@@ -141,14 +143,40 @@ def mcmc_tree_sampling(cnv_data, iterations=5000):
 
     return best_tree, best_likelihood, rate_params, likelihood_values
 
+
+# Random update rate for testing
+#def update_rate_params(current_params, tree, cnv_data):
+#    """Update rate parameters based on current tree and data."""
+#    # This is a placeholder. In practice, you'd implement a method to optimize these parameters
+#    # based on the current tree structure and observed data.
+#    mu, sigma = current_params
+#    mu *= random.uniform(0.9, 1.1)
+#    sigma *= random.uniform(0.9, 1.1)
+#    return (mu, sigma)
+
+
 def update_rate_params(current_params, tree, cnv_data):
-    """Update rate parameters based on current tree and data."""
-    # This is a placeholder. In practice, you'd implement a method to optimize these parameters
-    # based on the current tree structure and observed data.
-    mu, sigma = current_params
-    mu *= random.uniform(0.9, 1.1)
-    sigma *= random.uniform(0.9, 1.1)
-    return (mu, sigma)
+    """Optimize rate parameters (mu, sigma) to maximize likelihood based on current tree and CNV data."""
+    
+    # Define the objective function as the negative likelihood
+    def objective(params):
+        mu, sigma = params
+        if sigma <= 0:  # Ensure sigma is positive
+            return np.inf  # Penalize non-positive sigma
+        return -cnv_likelihood(tree, cnv_data, (mu, sigma))  # Negative for minimization
+    
+    # Set bounds for mu and sigma to prevent unrealistic values
+    bounds = [(1e-6, 5.0), (1e-6, 5.0)]  # Adjust bounds based on expected parameter ranges
+    
+    # Run the optimizer starting from the current parameters
+    result = minimize(objective, current_params, bounds=bounds, method='L-BFGS-B')
+    
+    # Return the optimized parameters if successful, otherwise return the current ones
+    if result.success:
+        return result.x  # Optimized mu, sigma
+    else:
+        print("Optimization failed; returning current parameters.")
+        return current_params  # Fallback in case optimization fails
 
 cnv_data = {
     # Clade A
@@ -174,6 +202,8 @@ cnv_data = {
     'species16_C': [1.0, 1.0, 1.0, 8.9, 9.9]
 }
 
+cnv_data = pd.DataFrame(cnv_data)
+
 # Run the MCMC sampling
 best_tree, best_likelihood, final_rate_params, likelihood_values = mcmc_tree_sampling(cnv_data, iterations=1000)
 
@@ -183,3 +213,10 @@ print(f"Final rate parameters: mu = {final_rate_params[0]}, sigma = {final_rate_
 # Plot
 plot_likelihood_curve(likelihood_values)
 plot_tree(best_tree)
+
+import os
+import pandas as pd 
+os.chdir("/Users/patricktruong/git/st_phylo/data/synthetic/spatial_data")
+df = pd.read_csv("st-genome_profile.tsv", sep = "\t", index_col = 0)
+
+df

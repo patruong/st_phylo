@@ -46,7 +46,7 @@ for species, cnv_values in cnv_data.items():
 
 ##### Here this wont work because it is not yet adapter for continuous data.
 # Run MCMC to infer the best tree
-best_tree, best_likelihood = mcmc_tree_sampling(cnv_data, iterations=10000)
+best_tree, best_likelihood = mcmc_tree_sampling(cnv_data_pure, iterations=10000)
 
 # Print the best tree
 tree_str = StringIO()
