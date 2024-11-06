@@ -50,9 +50,10 @@ def plot_likelihood_curve(likelihood_values):
     plt.tight_layout()
     plt.show()
 
-'''
+#'''
 def random_modify(tree):
     """Randomly modify the tree structure, including topology changes using NNI."""
+    
     new_tree = copy.deepcopy(tree)
     
     # Get all internal clades (excluding root)
@@ -104,8 +105,8 @@ def random_modify(tree):
             clade.branch_length *= random.uniform(0.8, 1.2)
     
     return new_tree
+#'''
 '''
-
 def random_modify(tree):
     """Randomly modify the tree structure."""
     new_tree = copy.deepcopy(tree)
@@ -121,7 +122,7 @@ def random_modify(tree):
         if clade.branch_length is not None:
             clade.branch_length *= random.uniform(0.8, 1.2)
     return new_tree
-
+'''
 def find_parent(root, target_clade):
     """Find the parent of a given clade in the tree."""
     stack = [root]
@@ -135,16 +136,35 @@ def find_parent(root, target_clade):
                     stack.append(child)
     return None  # Parent not found
 
-def hierarchical_init_tree(cnv_data): 
-    # Extract species names and CNV values
+def hierarchical_init_tree(cnv_data, alpha=0.5):
+    """
+    Initialize a phylogenetic tree using a custom distance metric that combines
+    spatial and genomic distances, with weighting factor `alpha`.
+    
+    Parameters:
+    - cnv_data: Dictionary where each key is a species name and each value is a dictionary
+                with "cnv_data" (genomic CNV data) and "coordinates" (spatial coordinates).
+    - alpha: Weighting factor for spatial vs genomic distance (0 <= alpha <= 1).
+    
+    Returns:
+    - bio_tree: Bio.Phylo tree based on the custom distance matrix.
+    """
+    # Extract species names, CNV values, and coordinates
     species = list(cnv_data.keys())
-    cnv_values = np.array(list(cnv_data.values()))
+    cnv_values = np.array([data["cnv_data"] for data in cnv_data.values()])
+    coordinates = np.array([data["coordinates"] for data in cnv_data.values()])
 
-    # Compute pairwise distances
-    distances = pdist(cnv_values, metric='euclidean')
+    # Compute pairwise genomic distances (D_genomic)
+    genomic_distances = pdist(cnv_values, metric='euclidean')
 
-    # Perform hierarchical clustering
-    linkage_matrix = linkage(distances, method='average')
+    # Compute pairwise spatial distances (D_spatial)
+    spatial_distances = pdist(coordinates, metric='euclidean')
+
+    # Combine distances using the weighting factor alpha
+    combined_distances = alpha * spatial_distances + (1 - alpha) * genomic_distances
+
+    # Perform hierarchical clustering on the combined distances
+    linkage_matrix = linkage(combined_distances, method='average')
 
     # Convert scipy tree to Bio.Phylo tree
     def scipy_to_biopytree(node, parent=None):
@@ -160,7 +180,6 @@ def hierarchical_init_tree(cnv_data):
     bio_tree = Phylo.BaseTree.Tree(root=scipy_to_biopytree(scipy_tree))
 
     return bio_tree
-
 
 def calculate_transition_prob_vectorized(rate_params, time, start_states, end_states, epsilon=1e-10):
     """Calculate transition probability for vectors of start and end states."""
@@ -206,20 +225,66 @@ def find_common_ancestor(tree, taxon1, taxon2):
     return path1[-1] if len(path1) < len(path2) else path2[-1]
 
 def cnv_likelihood(tree, cnv_data, rate_params, epsilon=1e-10, sample_fraction=0.1):
-    """Compute likelihood of the given tree based on a subset of taxa pairs for faster computation."""
+    """
+    Compute likelihood of the given tree based on a subset of taxa pairs for faster computation.
+    `cnv_data` should contain only CNV values, not spatial coordinates.
+    """
     likelihood = 0.0
-    all_pairs = list(itertools.combinations(cnv_data.keys(), 2))
+    # Extract only CNV data values for likelihood computation
+    cnv_values_only = {key: data["cnv_data"] for key, data in cnv_data.items()}
+    
+    all_pairs = list(itertools.combinations(cnv_values_only.keys(), 2))
     sampled_pairs = random.sample(all_pairs, int(len(all_pairs) * sample_fraction))  # Sample subset
     
     def pair_likelihood(pair):
-        cnv1, cnv2 = np.array(cnv_data[pair[0]]), np.array(cnv_data[pair[1]])
+        cnv1, cnv2 = np.array(cnv_values_only[pair[0]]), np.array(cnv_values_only[pair[1]])
         distance = max(tree_distance(tree, pair), epsilon)
         transition_probs = np.maximum(calculate_transition_prob_vectorized(rate_params, distance, cnv1, cnv2), epsilon)
         return np.sum(np.log(transition_probs))  # Log-likelihood for this pair
     
-    with ThreadPoolExecutor() as executor:
-        pair_likelihoods = list(executor.map(pair_likelihood, sampled_pairs))
+    #with ThreadPoolExecutor() as executor:
+    #    pair_likelihoods = list(executor.map(pair_likelihood, sampled_pairs))
+    pair_likelihoods = [pair_likelihood(pair) for pair in sampled_pairs]
+
+    return sum(pair_likelihoods) * (1 / sample_fraction)  # Scale for consistency
+
+def cnv_spatial_likelihood(tree, cnv_data, rate_params, beta=0.5, epsilon=1e-10, sample_fraction=0.1):
+    """
+    Compute likelihood of the given tree based on both CNV and spatial proximity.
+    `cnv_data` should contain both CNV values and spatial coordinates.
     
+    Parameters:
+    - tree: Phylogenetic tree.
+    - cnv_data: Dictionary with "cnv_data" (genomic CNV data) and "coordinates" (spatial coordinates).
+    - rate_params: Tuple with parameters (mu, sigma) for CNV model.
+    - beta: Weighting factor for spatial vs CNV likelihood (0 <= beta <= 1).
+    - epsilon: Small constant to avoid log(0).
+    - sample_fraction: Fraction of pairs to sample for likelihood calculation (for efficiency).
+    """
+    likelihood = 0.0
+    cnv_values_only = {key: data["cnv_data"] for key, data in cnv_data.items()}
+    coordinates_only = {key: data["coordinates"] for key, data in cnv_data.items()}
+    
+    all_pairs = list(itertools.combinations(cnv_values_only.keys(), 2))
+    sampled_pairs = random.sample(all_pairs, int(len(all_pairs) * sample_fraction))
+    
+    def pair_likelihood(pair):
+        cnv1, cnv2 = np.array(cnv_values_only[pair[0]]), np.array(cnv_values_only[pair[1]])
+        coord1, coord2 = np.array(coordinates_only[pair[0]]), np.array(coordinates_only[pair[1]])
+        
+        # Calculate genomic likelihood using CNV
+        distance = max(tree_distance(tree, pair), epsilon)
+        transition_probs = np.maximum(calculate_transition_prob_vectorized(rate_params, distance, cnv1, cnv2), epsilon)
+        genomic_likelihood = np.sum(np.log(transition_probs))
+        
+        # Calculate spatial likelihood component
+        spatial_distance = np.linalg.norm(coord1 - coord2)
+        spatial_likelihood = -beta * spatial_distance  # Negative spatial distance increases likelihood for closer pairs
+        
+        # Combine both components (spatially closer spots are weighted more)
+        return (1 - beta) * genomic_likelihood + spatial_likelihood
+
+    pair_likelihoods = [pair_likelihood(pair) for pair in sampled_pairs]
     return sum(pair_likelihoods) * (1 / sample_fraction)  # Scale for consistency
 
 def mcmc_tree_sampling(cnv_data, iterations=5000):
@@ -255,6 +320,48 @@ def mcmc_tree_sampling(cnv_data, iterations=5000):
 
     return best_tree, best_likelihood, rate_params, likelihood_values
 
+def mcmc_tree_sampling_spatial(cnv_data, iterations=5000, beta=0.5):
+    """
+    Perform MCMC sampling to find the best phylogenetic tree based on both CNV data and spatial coordinates.
+    
+    Parameters:
+    - cnv_data: Dictionary with "cnv_data" and "coordinates".
+    - iterations: Number of MCMC iterations.
+    - beta: Weighting factor for spatial influence.
+    """
+    tree = hierarchical_init_tree(cnv_data)
+    rate_params = (0.01, 0.1)  # Starting values for rate parameters
+    current_likelihood = cnv_spatial_likelihood(tree, cnv_data, rate_params, beta)
+    best_tree = tree
+    best_likelihood = current_likelihood
+    
+    likelihood_values = [current_likelihood]
+
+    with tqdm(total=iterations, desc="MCMC Sampling") as pbar:
+        for i in range(iterations):
+            new_tree = random_modify(tree)
+            new_likelihood = cnv_spatial_likelihood(new_tree, cnv_data, rate_params, beta)
+            
+            # Acceptance criterion
+            if new_likelihood > current_likelihood or random.random() < np.exp(new_likelihood - current_likelihood):
+                tree = new_tree
+                current_likelihood = new_likelihood
+                if new_likelihood > best_likelihood:
+                    best_tree = new_tree
+                    best_likelihood = new_likelihood
+            
+            likelihood_values.append(current_likelihood)
+            
+            if i % 100 == 0:
+                rate_params = update_rate_params(rate_params, tree, cnv_data)
+            
+            pbar.update(1)
+            if i % 100 == 0:
+                pbar.set_description(f"MCMC Sampling (Best Likelihood: {best_likelihood:.2f})")
+
+    return best_tree, best_likelihood, rate_params, likelihood_values
+
+
 def update_rate_params(current_params, tree, cnv_data):
     """Optimize rate parameters (mu, sigma) to maximize likelihood based on current tree and CNV data."""
     
@@ -282,45 +389,6 @@ def convert_data_frame_to_input_dict(df):
     """Convert DataFrame to dictionary format for CNV data."""
     cnv_dict = df.apply(lambda row: row.tolist(), axis=1).to_dict()
     return cnv_dict
-
-cnv_data = {
-    # Clade A
-    'species1_A': [10.3, 1.0, 1.0, 1.0, 1.0],
-    'species2_A': [10.2, 1.0, 1.0, 1.0, 1.0],
-    'species3_A': [10.1, 1.0, 1.0, 1.0, 1.0],
-    'species4_A': [10.4, 1.0, 1.0, 1.0, 1.0],
-    'species5_A': [10.0, 1.0, 1.0, 1.0, 1.0],
-    'species6_A': [10.3, 1.0, 1.0, 1.0, 1.0],
-
-    # Clade B
-    'species7_B': [1.0, 10.5, 1.0, 1.0, 1.0],
-    'species8_B': [1.0, 10.4, 1.0, 1.0, 1.0],
-    'species9_B': [1.0, 10.2, 1.0, 1.0, 1.0],
-    'species10_B': [1.0, 10.3, 1.0, 1.0, 1.0],
-    'species11_B': [1.0, 10.6, 1.0, 1.0, 1.0],
-    'species12_B': [1.0, 10.1, 1.0, 1.0, 1.0],
-
-    # Clade C
-    'species13_C': [1.0, 1.0, 1.0, 9.0, 10.0],
-    'species14_C': [1.0, 1.0, 1.0, 9.2, 10.1],
-    'species15_C': [1.0, 1.0, 1.0, 9.1, 10.2],
-    'species16_C': [1.0, 1.0, 1.0, 8.9, 9.9]
-}
-cnv_data = pd.DataFrame(cnv_data) #for vis
-cnv_data = cnv_data.T
-
-cnv_data = convert_data_frame_to_input_dict(cnv_data) # Code here just to illustrate how to get df to dict
-
-# Run the MCMC sampling
-best_tree, best_likelihood, final_rate_params, likelihood_values = mcmc_tree_sampling(cnv_data, iterations=1000)
-print(f"Best likelihood: {best_likelihood}")
-print(f"Final rate parameters: mu = {final_rate_params[0]}, sigma = {final_rate_params[1]}")
-# Plot
-plot_likelihood_curve(likelihood_values)
-plot_tree(best_tree)
-
-
-
 
 ######## test on growmeatissue data
 
@@ -353,6 +421,25 @@ def reannotate(annotations, df):
     annotations['new_annotation'] = annotations.apply(update_annotation, axis=1)
     return annotations
 
+def convert_data_frame_to_input_dict_with_coordinates(df, annotations):
+    """
+    Convert DataFrame to a dictionary format for CNV data with added spatial coordinates.
+    Each entry will include the CNV values along with the (x, y) spatial coordinates.
+    """
+    # Create a dictionary with CNV data as lists
+    cnv_dict = df.apply(lambda row: row.tolist(), axis=1).to_dict()
+
+    # Add spatial coordinates from annotations
+    for spot_id in cnv_dict.keys():
+        spot_name = spot_id.split("{")[0]  # Extract the original spot name
+        if spot_name in annotations.index:
+            # Get coordinates as tuple (x, y)
+            coordinates = (annotations.loc[spot_name, "x"], annotations.loc[spot_name, "y"])
+            # Append coordinates to the CNV data for this spot
+            cnv_dict[spot_id] = {"cnv_data": cnv_dict[spot_id], "coordinates": coordinates}
+    
+    return cnv_dict
+
 annotations = reannotate(annotations, df)
 annotations.new_annotation.unique()
 annotations = reannotate(annotations, df)
@@ -363,9 +450,19 @@ spot_to_spot_id = dict(zip(annotations["Spot"], annotations["spot_id"]))
 
 genome_profile_log.rename(index=spot_to_spot_id, inplace=True)
 cnv_data = convert_data_frame_to_input_dict(genome_profile_log) # Code here just to illustrate how to get df to dict
-best_tree, best_likelihood, final_rate_params, likelihood_values = mcmc_tree_sampling(cnv_data, iterations=1000) # Why do i need to run this multiple times before it works?????
+
+#cnv_data['Spot_44{A2}']
+
+
+annotations.set_index("Spot", inplace=True)  # Ensure annotations is indexed by 'Spot' for easy lookup
+cnv_data_with_coords = convert_data_frame_to_input_dict_with_coordinates(genome_profile_log, annotations)
+best_tree, best_likelihood, final_rate_params, likelihood_values = mcmc_tree_sampling(cnv_data_with_coords, iterations=1000) 
+best_tree, best_likelihood, final_rate_params, likelihood_values = mcmc_tree_sampling_spatial(cnv_data_with_coords, iterations=1000, beta = 0.5) 
 plot_likelihood_curve(likelihood_values)
 plot_tree(best_tree)
+
+
+
 
 
 ########## Profiler

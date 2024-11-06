@@ -1,7 +1,9 @@
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
-from scipy.cluster.hierarchy import linkage
+import matplotlib.gridspec as gridspec  # Import gridspec
+
+from scipy.cluster.hierarchy import linkage, dendrogram
 import scanpy as sc
 import numpy as np
 from anndata import AnnData
@@ -9,54 +11,143 @@ import squidpy as sq
 from PIL import Image
 
 
-def plot_genome_profile_heatmap(file_path, clustering_method='ward', cmap="viridis"):
+
+def plot_genome_profile_heatmaps_with_dendrograms(file_path, clustering_method='ward', cmap="viridis"):
     """
-    Plots a genome profile heatmap with hierarchical clustering on spots.
+    Plots two genome profile heatmaps side by side, each with their dendrograms and spot annotations:
+    - Left: Without log transformation.
+    - Right: With log-transformed gene expression.
 
     Parameters:
     - file_path (str): Path to the genome profile TSV file.
     - clustering_method (str): Clustering method to use for hierarchical clustering (default is 'ward').
-    - cmap (str): Color map to use for the heatmap (default is "viridis").
-    
+    - cmap (str): Color map to use for the heatmaps (default is "viridis").
+
     Returns:
-    - None: Displays the heatmap.
+    - None: Displays the heatmaps with dendrograms.
     """
     # Load the data
     genome_profile = pd.read_csv(file_path, sep='\t')
 
     # Set the gene names as columns and spots as rows
-    genome_profile = genome_profile.set_index('Unnamed: 0').transpose()
+    genome_profile = genome_profile.set_index(genome_profile.columns[0]).transpose()
 
-    # Perform hierarchical clustering on the spots
-    linkage_matrix = linkage(genome_profile, method=clustering_method)
+    # Filter away spots where all genes are 1.0
+    genome_profile = genome_profile.loc[~(genome_profile.iloc[:, 1:] == 1.0).all(axis=1)]
 
-    # Plot the heatmap with hierarchical clustering on the spots (rows)
-    g = sns.clustermap(
-        genome_profile,
-        row_cluster=True,
-        col_cluster=False,
-        row_linkage=linkage_matrix,
-        cmap=cmap,
-        figsize=(15, 10)
+    # Apply log transformation (adding 1 to avoid log(0))
+    genome_profile_log = np.log1p(genome_profile)
+
+    # Prepare the datasets in a list
+    datasets = [
+        ('Without Log Transformation', genome_profile),
+        ('With Log Transformation', genome_profile_log)
+    ]
+
+    # Create a figure
+    fig = plt.figure(figsize=(20, 10))
+    fig.suptitle(
+        "Genome Profile Heatmaps with Hierarchical Clustering on Spots",
+        fontsize=20,
+        y=0.98  # Adjust the y position if necessary
     )
 
-    # Adjust the layout to make room for the title
-    plt.subplots_adjust(top=0.92)
+    # Create gridspec
+    gs = gridspec.GridSpec(1, 2, width_ratios=[1, 1])
 
-    # Set the centered title
-    g.fig.suptitle(
-        "Genome Profile Heatmap with Hierarchical Clustering on Spots",
-        x=0.5,
-        y=0.98,
-        ha='center',
-        fontsize=16
-    )
+    for i, (title, data) in enumerate(datasets):
+        # Perform hierarchical clustering on the spots (rows)
+        linkage_matrix = linkage(data, method=clustering_method)
 
+        # Create a gridspec within the main gridspec for dendrogram and heatmap
+        gs_inner = gridspec.GridSpecFromSubplotSpec(
+            1, 2,
+            width_ratios=[0.3, 1],
+            wspace=0.05,  # Adjust spacing between dendrogram and heatmap
+            subplot_spec=gs[i]
+        )
+
+        # Plot dendrogram
+        ax_dendro = fig.add_subplot(gs_inner[0])
+        dendro = dendrogram(
+            linkage_matrix,
+            orientation='left',
+            no_labels=True,
+            ax=ax_dendro,
+            color_threshold=0
+        )
+        ax_dendro.invert_yaxis()
+        ax_dendro.axis('off')
+
+        # Get the order of the leaves
+        row_order = dendro['leaves']
+
+        # Reorder the data according to clustering
+        data_ordered = data.iloc[row_order, :]
+
+        # Plot heatmap
+        ax_heatmap = fig.add_subplot(gs_inner[1])
+        sns.heatmap(
+            data_ordered,
+            ax=ax_heatmap,
+            cmap=cmap,
+            cbar_kws={
+                'label': (
+                    'Expression Level' if title == 'Without Log Transformation'
+                    else 'Log(Expression Level)'
+                )
+            },
+            xticklabels=True,
+            yticklabels=True  # Display spot annotations
+        )
+        ax_heatmap.set_title(title, fontsize=16)
+        ax_heatmap.set_xlabel("Genes")
+        ax_heatmap.set_ylabel("")
+
+        # Adjust the heatmap's y-axis to match the dendrogram
+        ax_heatmap.yaxis.set_ticks_position('right')
+        ax_heatmap.yaxis.set_label_position('right')
+        ax_heatmap.tick_params(axis='y', which='both', length=0)
+        # Set the y-tick labels to the spot names
+        ax_heatmap.set_yticklabels(data_ordered.index.tolist(), fontsize=8)
+        # Optionally adjust the rotation
+        plt.setp(ax_heatmap.get_yticklabels(), rotation=0)
+
+    # Adjust layout to make room for the title
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.show()
 
-plot_genome_profile_heatmap("/Users/patricktruong/git/st_phylo/data/synthetic/spatial_data/st-genome_profile.tsv")
+# FILTER AWAY CNV WITHOUT ANY CHANGE...
 
-def plot_spatial_with_histology(file_paths, histology_image_path, gene_name, spot_size=3, scalef=3.4, dx=52, dy=45, alpha_img=0.7):
+file_path = "/Users/patricktruong/git/st_phylo/data/synthetic/spatial_data/st-genome_profile.tsv"
+
+genome_profile = pd.read_csv(file_path, sep='\t')
+genome_profile = genome_profile.set_index(genome_profile.columns[0]).transpose()
+
+plot_genome_profile_heatmaps_with_dendrograms("/Users/patricktruong/git/st_phylo/data/synthetic/spatial_data/st-genome_profile.tsv")
+
+
+
+def reannotate(annotations, df):
+    annotations["x"] = df.x
+    annotations["y"] = df.y
+    x_mid = (annotations['x'].max() + annotations['x'].min()) / 2
+    y_mid = (annotations['y'].max() + annotations['y'].min()) / 2
+
+    def update_annotation(row):
+        if row['annotation'] == 'benign':
+            return 'benign'
+        elif row['annotation'] == 'aberrant':
+            if (row['x'] > x_mid and row['y'] > y_mid):
+                return 'A1'
+            elif (row['x'] < x_mid and row['y'] < y_mid):
+                return 'A2'
+        return row['annotation']  # Keep original if none of the conditions match
+
+    annotations['new_annotation'] = annotations.apply(update_annotation, axis=1)
+    return annotations
+
+def plot_spatial_with_histology(file_paths, histology_image_path, gene_name, spot_size=3, scalef=3.4, dx=52, dy=45, alpha_img=0.7, reannotate_aberrant = True):
     """
     Plots annotation, gene expression, and cell count on a histology image background.
 
@@ -76,6 +167,11 @@ def plot_spatial_with_histology(file_paths, histology_image_path, gene_name, spo
     df = pd.read_csv(file_paths['meta'], sep="\t")
     exp = pd.read_csv(file_paths['exp'], sep="\t")
     annotations = pd.read_csv(file_paths['annotation'], sep="\t", header=None, names=["Spot", "annotation"])
+
+    # Reannotate
+    if reannotate_aberrant == True:
+        annotations = reannotate(annotations, df)
+        annotations["annotation"] = annotations['new_annotation']
 
     # Process expression data
     exp.set_index('Unnamed: 0', inplace=True)
@@ -153,8 +249,7 @@ def plot_spatial_with_histology(file_paths, histology_image_path, gene_name, spo
     plt.show()
 
 
-plot_spatial_with_histology(file_paths, histology_image_path, gene_name, spot_size=3, scalef=3.4, dx=52, dy=45, alpha_img=0.7)
-    # Load metadata, expression data, and annotations
+
 df = pd.read_csv("/Users/patricktruong/git/st_phylo/data/synthetic/spatial_data/st-meta.tsv", sep="\t")
 exp = pd.read_csv("/Users/patricktruong/git/st_phylo/data/synthetic/spatial_data/st-expression.tsv", sep="\t")
 annotations = pd.read_csv("/Users/patricktruong/git/st_phylo/data/synthetic/spatial_data/st-annotation.tsv", sep="\t", header=None, names=["Spot", "annotation"])
@@ -173,4 +268,39 @@ file_paths = {
 histology_image_path = f"{img_path}/tissue.png"
 
 # Call the function with the updated paths
-plot_spatial_with_histology(file_paths, histology_image_path, gene_name="Gene_0")
+plot_spatial_with_histology(file_paths, histology_image_path, gene_name="Gene_0", reannotate_aberrant = True)
+plot_spatial_with_histology(file_paths, histology_image_path, gene_name="Gene_0", reannotate_aberrant = False)
+
+
+### Map spot to aberrant group 
+
+df = pd.read_csv("/Users/patricktruong/git/st_phylo/data/synthetic/spatial_data/st-meta.tsv", sep="\t")
+annotations = pd.read_csv("/Users/patricktruong/git/st_phylo/data/synthetic/spatial_data/st-annotation.tsv", sep="\t", header=None, names=["Spot", "annotation"])
+
+def reannotate(annotations, df):
+    annotations["x"] = df.x
+    annotations["y"] = df.y
+    x_mid = (annotations['x'].max() + annotations['x'].min()) / 2
+    y_mid = (annotations['y'].max() + annotations['y'].min()) / 2
+
+    def update_annotation(row):
+        if row['annotation'] == 'benign':
+            return 'benign'
+        elif row['annotation'] == 'aberrant':
+            if (row['x'] > x_mid and row['y'] > y_mid):
+                return 'A1'
+            elif (row['x'] < x_mid and row['y'] < y_mid):
+                return 'A2'
+        return row['annotation']  # Keep original if none of the conditions match
+
+    annotations['new_annotation'] = annotations.apply(update_annotation, axis=1)
+    return annotations
+
+annotations = reannotate(annotations, df)
+annotations.new_annotation.unique()
+
+annotations["annotation"] = annotations['new_annotation']
+
+
+annotations = reannotate(annotations, df)
+annotations["annotation"] = annotations['new_annotation']
